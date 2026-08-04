@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #fdf6ec;
+  --ink: #001117;
+  --dim: #4b5560;
+  --orange: #d9741c;
+  --line: #e7d8c1;
+  --card: #fffbf3;
+  font-family: "General Sans", system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(46% 28% at 90% 0%, rgba(217, 116, 28, 0.18), transparent 70%),
+    radial-gradient(40% 24% at 8% 16%, rgba(198, 92, 138, 0.12), transparent 70%),
+    var(--bg);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.font-display {
+  font-family: "Clash Display", system-ui, sans-serif;
+}
