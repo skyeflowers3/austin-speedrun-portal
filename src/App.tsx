@@ -1,31 +1,70 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { inviteUrlForCode, isSupabaseConfigured, supabase } from './lib/supabase'
-import type { Household } from './types'
+import type { Child, Household } from './types'
 
-type View = 'loading' | 'auth' | 'dashboard' | 'unconfigured'
-type AuthMode = 'signin' | 'create'
+type View = 'loading' | 'login' | 'setpw' | 'dashboard' | 'unconfigured'
+
+const SEASON_START = new Date('2026-10-05T00:00:00-05:00')
+
+const DEMO_HOUSEHOLD: Household = {
+  id: 'demo',
+  parent_name: 'Jessie Wang',
+  email: 'parent@example.com',
+  zip: '78704',
+  status: 'registered',
+  referral_code: 'SPD-7K2Q',
+  coppa_required: true,
+  children: [
+    { id: '1', full_name: 'Maya Wang', grade: '7th', date_of_birth: '2013-05-12', school_name: 'Kealing Middle School', school_type: 'Public', student_email: 'maya@example.com', accommodations: null, has_home_device: true },
+    { id: '2', full_name: 'Leo Wang', grade: '6th', date_of_birth: '2014-09-03', school_name: 'Kealing Middle School', school_type: 'Public', student_email: null, accommodations: null, has_home_device: true },
+  ],
+}
+
+function ageFromDob(dob: string | null): number | null {
+  if (!dob) return null
+  const d = new Date(dob)
+  if (isNaN(d.getTime())) return null
+  const t = new Date()
+  let a = t.getFullYear() - d.getFullYear()
+  const m = t.getMonth() - d.getMonth()
+  if (m < 0 || (m === 0 && t.getDate() < d.getDate())) a--
+  return a
+}
+
+function useCountdown(target: Date) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const diff = Math.max(0, target.getTime() - now)
+  return {
+    days: Math.floor(diff / 86400000),
+    hrs: Math.floor((diff % 86400000) / 3600000),
+    mins: Math.floor((diff % 3600000) / 60000),
+    secs: Math.floor((diff % 60000) / 1000),
+    live: diff === 0,
+  }
+}
+
+const isDemo = new URLSearchParams(window.location.search).has('demo')
+const hasPassword = (s: Session | null) => Boolean(s?.user?.user_metadata?.password_set)
 
 export default function App() {
   const [view, setView] = useState<View>(
-    isSupabaseConfigured ? 'loading' : 'unconfigured',
+    isDemo ? 'dashboard' : isSupabaseConfigured ? 'loading' : 'unconfigured',
   )
-  const [authMode, setAuthMode] = useState<AuthMode>('signin')
   const [session, setSession] = useState<Session | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [password2, setPassword2] = useState('')
-  const [loginErr, setLoginErr] = useState('')
-  const [sending, setSending] = useState(false)
-  const [household, setHousehold] = useState<Household | null>(null)
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [household, setHousehold] = useState<Household | null>(isDemo ? DEMO_HOUSEHOLD : null)
+  const [zipCount, setZipCount] = useState<number | null>(isDemo ? 41 : null)
   const [dashErr, setDashErr] = useState('')
   const [copied, setCopied] = useState(false)
-
-  const [newPassword, setNewPassword] = useState('')
-  const [newPassword2, setNewPassword2] = useState('')
-  const [pwMsg, setPwMsg] = useState('')
-  const [pwErr, setPwErr] = useState('')
-  const [pwSaving, setPwSaving] = useState(false)
 
   const loadHousehold = useCallback(async () => {
     if (!supabase) return
@@ -34,7 +73,7 @@ export default function App() {
     if (error) {
       setDashErr(
         /no registration found/i.test(error.message)
-          ? 'No Speedrun registration found for this email. Register on the main site first, then create a portal password here.'
+          ? 'We couldn’t find a Speedrun registration for this email. Sign in with the same email you registered with.'
           : error.message,
       )
       setHousehold(null)
@@ -42,440 +81,401 @@ export default function App() {
     }
     const row = (typeof data === 'string' ? JSON.parse(data) : data) as Household
     setHousehold(row)
+    if (row?.zip) {
+      const { count } = await supabase
+        .from('participants')
+        .select('id', { count: 'exact', head: true })
+        .eq('zip', row.zip)
+      setZipCount(count ?? null)
+    }
   }, [])
 
   useEffect(() => {
-    if (!supabase) return
-
+    if (isDemo || !supabase) return
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session)
-      setView(data.session ? 'dashboard' : 'auth')
+      setView(data.session ? (hasPassword(data.session) ? 'dashboard' : 'setpw') : 'login')
     })
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
+      if (event === 'PASSWORD_RECOVERY') { setView('setpw'); setSession(next); return }
       setSession(next)
-      setView(next ? 'dashboard' : 'auth')
+      setView(next ? (hasPassword(next) ? 'dashboard' : 'setpw') : 'login')
     })
-
     return () => sub.subscription.unsubscribe()
   }, [])
 
   useEffect(() => {
-    if (view === 'dashboard' && session) {
-      void loadHousehold()
-    }
+    if (!isDemo && view === 'dashboard' && session) void loadHousehold()
   }, [view, session, loadHousehold])
 
-  async function ensureHouseholdOrSignOut() {
-    if (!supabase) return false
-    const { error } = await supabase.rpc('get_my_household')
-    if (error) {
-      await supabase.auth.signOut()
-      setLoginErr(
-        /no registration found/i.test(error.message)
-          ? 'No Speedrun registration for that email. Register on the main site first.'
-          : error.message,
-      )
-      return false
-    }
-    return true
-  }
+  function resetMessages() { setErr(''); setMsg('') }
 
-  async function onAuthSubmit(e: React.FormEvent) {
+  async function login(e: React.FormEvent) {
     e.preventDefault()
     if (!supabase) return
-    setLoginErr('')
-    const trimmed = email.trim().toLowerCase()
-    if (!trimmed.includes('@') || !password) {
-      setLoginErr('Enter email and password.')
-      return
-    }
-
-    setSending(true)
-    try {
-      if (authMode === 'create') {
-        if (password.length < 8) {
-          setLoginErr('Use at least 8 characters.')
-          return
-        }
-        if (password !== password2) {
-          setLoginErr('Passwords do not match.')
-          return
-        }
-
-        // Prefer admin set-password when the Auth user already exists (e.g. from an
-        // earlier magic-link login) so we don't show a bare "User already registered".
-        const provisioned = await supabase.functions.invoke('set-portal-password', {
-          body: { email: trimmed, password },
-        })
-        const provisionBody =
-          typeof provisioned.data === 'string'
-            ? JSON.parse(provisioned.data)
-            : provisioned.data
-
-        if (!provisioned.error && provisionBody?.ok) {
-          const { error: signErr } = await supabase.auth.signInWithPassword({
-            email: trimmed,
-            password,
-          })
-          if (signErr) {
-            setLoginErr(signErr.message)
-            return
-          }
-          const ok = await ensureHouseholdOrSignOut()
-          if (!ok) return
-          return
-        }
-
-        // Fallback: brand-new Auth user
-        const { data, error } = await supabase.auth.signUp({
-          email: trimmed,
-          password,
-        })
-        if (error) {
-          if (/already|registered|exists/i.test(error.message)) {
-            setLoginErr(
-              'This email already has a portal login from an earlier email-link sign-in, but no password yet. Quick fix: Supabase → Authentication → Users → delete that user → Create password here again. Or deploy the set-portal-password function.',
-            )
-          } else {
-            setLoginErr(error.message)
-          }
-          return
-        }
-        if (!data.session) {
-          setLoginErr(
-            'Account created, but email confirmation is still on. In Supabase → Sign In / Providers → User Signups, turn off “Confirm email”, then sign in.',
-          )
-          return
-        }
-        const ok = await ensureHouseholdOrSignOut()
-        if (!ok) return
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: trimmed,
-          password,
-        })
-        if (error) {
-          setLoginErr(error.message)
-          return
-        }
-        const ok = await ensureHouseholdOrSignOut()
-        if (!ok) return
-      }
-    } finally {
-      setSending(false)
+    resetMessages()
+    const mail = email.trim().toLowerCase()
+    if (!mail.includes('@')) return setErr('Enter a valid email.')
+    if (!password) return setErr('Enter your password.')
+    setBusy(true)
+    const { error } = await supabase.auth.signInWithPassword({ email: mail, password })
+    setBusy(false)
+    if (error) {
+      setErr(/invalid login/i.test(error.message)
+        ? 'That email or password didn’t work. First time here? Use “Email me a set-up link” below.'
+        : error.message)
     }
   }
 
-  async function changePassword(e: React.FormEvent) {
+  async function emailSetupLink() {
+    if (!supabase) return
+    resetMessages()
+    const mail = email.trim().toLowerCase()
+    if (!mail.includes('@')) return setErr('Enter your email above first.')
+    setBusy(true)
+    const { error } = await supabase.auth.resetPasswordForEmail(mail, { redirectTo: window.location.origin })
+    setBusy(false)
+    if (error) return setErr(error.message)
+    setMsg(`Sent. Check ${mail} for a link to set your password.`)
+  }
+
+  async function saveNewPassword(e: React.FormEvent) {
     e.preventDefault()
     if (!supabase) return
-    setPwErr('')
-    setPwMsg('')
-    if (newPassword.length < 8) {
-      setPwErr('Use at least 8 characters.')
-      return
-    }
-    if (newPassword !== newPassword2) {
-      setPwErr('Passwords do not match.')
-      return
-    }
-    setPwSaving(true)
-    const { error } = await supabase.auth.updateUser({ password: newPassword })
-    setPwSaving(false)
-    if (error) {
-      setPwErr(error.message)
-      return
-    }
-    setNewPassword('')
-    setNewPassword2('')
-    setPwMsg('Password updated.')
+    resetMessages()
+    if (password.length < 8) return setErr('Use at least 8 characters.')
+    setBusy(true)
+    const { error } = await supabase.auth.updateUser({ password, data: { password_set: true } })
+    setBusy(false)
+    if (error) return setErr(error.message)
+    setPassword('')
+    setView('dashboard')
   }
 
   async function signOut() {
     if (!supabase) return
     await supabase.auth.signOut()
-    setHousehold(null)
+    setHousehold(null); setZipCount(null); setPassword('')
   }
 
   async function copyInvite() {
     if (!household?.referral_code) return
-    const link = inviteUrlForCode(household.referral_code)
     try {
-      await navigator.clipboard.writeText(link)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      /* ignore */
-    }
+      await navigator.clipboard.writeText(inviteUrlForCode(household.referral_code))
+      setCopied(true); setTimeout(() => setCopied(false), 2000)
+    } catch { /* ignore */ }
   }
 
   if (view === 'unconfigured') {
     return (
-      <Shell>
-        <Card>
-          <h1 className="font-display text-3xl font-bold tracking-tight">Parent portal</h1>
-          <p className="mt-3 text-[var(--dim)]">
-            Add <code className="text-sm">.env</code> from <code className="text-sm">.env.example</code>, then
-            restart the dev server.
-          </p>
-        </Card>
-      </Shell>
+      <AuthShell>
+        <h1 className="font-display text-2xl font-bold">Parent portal</h1>
+        <p className="mt-3 text-[var(--dim)]">
+          Add <code className="text-sm">.env</code> from <code className="text-sm">.env.example</code> with your
+          Supabase URL and anon key, then restart the dev server.
+        </p>
+      </AuthShell>
     )
   }
 
   if (view === 'loading') {
+    return <div className="grid min-h-screen place-items-center text-[var(--dim)]">Loading…</div>
+  }
+
+  if (view === 'setpw') {
     return (
-      <Shell>
-        <p className="text-[var(--dim)]">Loading…</p>
-      </Shell>
+      <AuthShell subtitle="Set your portal password">
+        <p className="text-[var(--dim)]">You’re verified. Pick a password and you’ll use it to log in from now on.</p>
+        <form onSubmit={saveNewPassword} className="mt-5 space-y-4">
+          <Field label="Create a password">
+            <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
+              className={inputCls} placeholder="At least 8 characters" required />
+          </Field>
+          {err ? <Alert kind="err">{err}</Alert> : null}
+          {msg ? <Alert kind="ok">{msg}</Alert> : null}
+          <PrimaryBtn busy={busy}>Save password &amp; continue</PrimaryBtn>
+        </form>
+      </AuthShell>
     )
   }
 
-  if (view === 'auth') {
+  if (view === 'login') {
     return (
-      <Shell>
-        <Card>
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--orange)]">
-            Austin Speedrun
-          </p>
-          <h1 className="font-display mt-2 text-3xl font-bold tracking-tight">Parent portal</h1>
-          <p className="mt-3 text-[var(--dim)] leading-relaxed">
-            {authMode === 'signin'
-              ? 'Sign in with the email and password you created for the portal.'
-              : 'First time? Use the same email you registered with, and choose a password. No email link required.'}
-          </p>
-
-          <div className="mt-5 flex gap-2 rounded-xl bg-[rgba(0,0,0,0.04)] p-1">
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode('signin')
-                setLoginErr('')
-                setPassword('')
-                setPassword2('')
-              }}
-              className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
-                authMode === 'signin' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
-              }`}
-            >
-              Sign in
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setAuthMode('create')
-                setLoginErr('')
-                setEmail('')
-                setPassword('')
-                setPassword2('')
-              }}
-              className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
-                authMode === 'create' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
-              }`}
-            >
-              Create password
-            </button>
-          </div>
-
-          <form
-            onSubmit={onAuthSubmit}
-            className="mt-5 space-y-4"
-            autoComplete="off"
-          >
-            <label className="block">
-              <span className="text-sm font-medium">Email</span>
-              <input
-                type="email"
-                name="asr-portal-email"
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none focus:border-[var(--orange)]"
-                placeholder="you@example.com"
-                required
-              />
-            </label>
-            <label className="block">
-              <span className="text-sm font-medium">Password</span>
-              <input
-                type="password"
-                name="asr-portal-password"
-                autoComplete="new-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none focus:border-[var(--orange)]"
-                required
-              />
-            </label>
-            {authMode === 'create' ? (
-              <label className="block">
-                <span className="text-sm font-medium">Confirm password</span>
-                <input
-                  type="password"
-                  name="asr-portal-password-confirm"
-                  autoComplete="new-password"
-                  value={password2}
-                  onChange={(e) => setPassword2(e.target.value)}
-                  className="mt-1.5 w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none focus:border-[var(--orange)]"
-                  required
-                />
-              </label>
-            ) : null}
-            {loginErr ? <p className="text-sm text-red-700">{loginErr}</p> : null}
-            <button
-              type="submit"
-              disabled={sending}
-              className="w-full rounded-xl bg-[var(--ink)] px-4 py-3.5 font-semibold text-white disabled:opacity-60"
-            >
-              {sending
-                ? authMode === 'create'
-                  ? 'Creating…'
-                  : 'Signing in…'
-                : authMode === 'create'
-                  ? 'Create password'
-                  : 'Sign in'}
-            </button>
-          </form>
-        </Card>
-      </Shell>
-    )
-  }
-
-  const invite = household?.referral_code
-    ? inviteUrlForCode(household.referral_code)
-    : ''
-
-  return (
-    <Shell>
-      <header className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--orange)]">
-            Austin Speedrun
-          </p>
-          <h1 className="font-display mt-1 text-3xl font-bold tracking-tight">Your household</h1>
-          {session?.user?.email ? (
-            <p className="mt-1 text-sm text-[var(--dim)]">{session.user.email}</p>
-          ) : null}
-        </div>
-        <button
-          type="button"
-          onClick={() => void signOut()}
-          className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm font-medium"
-        >
-          Sign out
-        </button>
-      </header>
-
-      {dashErr ? (
-        <Card>
-          <p className="text-red-700">{dashErr}</p>
-          <button
-            type="button"
-            onClick={() => void loadHousehold()}
-            className="mt-4 text-sm font-semibold text-[var(--orange)]"
-          >
-            Try again
+      <AuthShell subtitle="Log in to your season">
+        <form onSubmit={login} className="space-y-4">
+          <Field label="Email">
+            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)}
+              className={inputCls} placeholder="you@example.com" required />
+          </Field>
+          <Field label="Password">
+            <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)}
+              className={inputCls} placeholder="Your password" required />
+          </Field>
+          {err ? <Alert kind="err">{err}</Alert> : null}
+          {msg ? <Alert kind="ok">{msg}</Alert> : null}
+          <PrimaryBtn busy={busy}>Log in</PrimaryBtn>
+        </form>
+        <div className="mt-5 rounded-xl border border-[var(--line)] bg-[var(--bg2)] p-4">
+          <p className="text-sm font-semibold">First time, or forgot your password?</p>
+          <p className="mt-1 text-sm text-[var(--dim)]">Enter your email above, then get a one-time link to set it.</p>
+          <button type="button" onClick={() => void emailSetupLink()} disabled={busy}
+            className="mt-3 w-full rounded-xl border border-[var(--line2)] bg-white px-4 py-2.5 text-sm font-semibold transition hover:bg-white/60 disabled:opacity-60">
+            Email me a set-up link
           </button>
+        </div>
+        <p className="mt-5 text-xs leading-relaxed text-[var(--dim2)]">
+          Log in with the same email you used to sign up for the Speedrun, so we can pull up your family’s registration.
+        </p>
+      </AuthShell>
+    )
+  }
+
+  // DASHBOARD
+  return (
+    <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 py-8 sm:py-12">
+      <TopBar email={isDemo ? household?.email : session?.user?.email} onSignOut={() => void signOut()} demo={isDemo} />
+      {dashErr ? (
+        <Card className="mt-6">
+          <p className="text-red-700">{dashErr}</p>
+          <button type="button" onClick={() => void loadHousehold()} className="mt-4 text-sm font-semibold text-[var(--orange)]">Try again</button>
         </Card>
       ) : !household ? (
-        <p className="text-[var(--dim)]">Loading your registration…</p>
+        <p className="mt-6 text-[var(--dim)]">Loading your registration…</p>
       ) : (
-        <div className="space-y-5">
-          <Card>
-            <h2 className="font-display text-xl font-bold">Children</h2>
-            <ul className="mt-4 divide-y divide-[var(--line)]">
-              {household.children.length === 0 ? (
-                <li className="py-3 text-[var(--dim)]">No children on file yet.</li>
-              ) : (
-                household.children.map((c) => (
-                  <li key={c.id} className="py-3">
-                    <div className="font-semibold">{c.full_name}</div>
-                    <div className="mt-1 text-sm text-[var(--dim)]">
-                      {[c.grade, c.school_name, c.school_type].filter(Boolean).join(' · ')}
-                    </div>
-                  </li>
-                ))
-              )}
-            </ul>
-          </Card>
-
-          <Card>
-            <h2 className="font-display text-xl font-bold">Your referral link</h2>
-            <p className="mt-2 text-sm text-[var(--dim)]">
-              Share this so friends count as your referrals when they sign up.
-            </p>
-            <p className="mt-3 font-mono text-sm font-semibold tracking-wide">
-              Code: {household.referral_code}
-            </p>
-            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-              <input
-                readOnly
-                value={invite}
-                className="min-w-0 flex-1 rounded-xl border border-[var(--line)] bg-white px-3 py-2.5 text-sm"
-                aria-label="Invite link"
-              />
-              <button
-                type="button"
-                onClick={() => void copyInvite()}
-                className="rounded-xl bg-[var(--ink)] px-4 py-2.5 text-sm font-semibold text-white"
-              >
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-          </Card>
-
-          <Card>
-            <h2 className="font-display text-xl font-bold">Change password</h2>
-            <form onSubmit={changePassword} className="mt-4 space-y-3">
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="New password"
-                className="w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none focus:border-[var(--orange)]"
-              />
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={newPassword2}
-                onChange={(e) => setNewPassword2(e.target.value)}
-                placeholder="Confirm new password"
-                className="w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none focus:border-[var(--orange)]"
-              />
-              {pwErr ? <p className="text-sm text-red-700">{pwErr}</p> : null}
-              {pwMsg ? <p className="text-sm text-emerald-800">{pwMsg}</p> : null}
-              <button
-                type="submit"
-                disabled={pwSaving}
-                className="rounded-xl bg-[var(--ink)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
-              >
-                {pwSaving ? 'Saving…' : 'Update password'}
-              </button>
-            </form>
-          </Card>
-        </div>
+        <Dashboard household={household} zipCount={zipCount} onCopy={() => void copyInvite()} copied={copied} />
       )}
-    </Shell>
-  )
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="mx-auto flex min-h-screen w-full max-w-xl flex-col px-5 py-10 sm:py-14">
-      {children}
     </div>
   )
 }
 
-function Card({ children }: { children: React.ReactNode }) {
+/* ------------------------------- dashboard ------------------------------- */
+
+function Dashboard({ household, zipCount, onCopy, copied }: { household: Household; zipCount: number | null; onCopy: () => void; copied: boolean }) {
+  const cd = useCountdown(SEASON_START)
+  const invite = household.referral_code ? inviteUrlForCode(household.referral_code) : ''
+  const first = household.parent_name?.split(' ')[0] || 'there'
+  const under13 = household.children.filter((c) => (ageFromDob(c.date_of_birth) ?? 99) < 13)
+
   return (
-    <div className="rounded-2xl border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm">
-      {children}
+    <div className="mt-6 space-y-5">
+      <div className="relative overflow-hidden rounded-3xl border border-white/10 bg-[var(--ink)] p-7 text-white sm:p-9">
+        <div className="pointer-events-none absolute -right-16 -top-20 h-72 w-72 rounded-full bg-[var(--orange)] opacity-25 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-24 -left-10 h-64 w-64 rounded-full bg-[var(--teal)] opacity-15 blur-3xl" />
+        <p className="font-mono text-xs font-bold uppercase tracking-[0.16em] text-[var(--yellow)]">Your Speedrun · Season 01</p>
+        <h1 className="font-display mt-2 text-3xl font-bold tracking-tight sm:text-[2.6rem] sm:leading-[1.05]">Hey {first}, you’re in.</h1>
+        <p className="mt-2 max-w-lg text-white/65">
+          {cd.live ? 'The season is live. Time to climb.' : 'Registration is confirmed. This is your season command center.'}
+        </p>
+        <div className="mt-7">
+          <p className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-white/45">Season starts in</p>
+          <div className="mt-2.5 flex items-end gap-3.5 sm:gap-4">
+            <CountUnit n={cd.days} l="days" /><Sep /><CountUnit n={cd.hrs} l="hrs" /><Sep />
+            <CountUnit n={cd.mins} l="min" /><Sep /><CountUnit n={cd.secs} l="sec" />
+          </div>
+          <p className="mt-4 font-mono text-xs text-white/45">Oct 5, 2026 · TimeBack + baseline assessment unlock day one</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 sm:gap-4">
+        <Stat n={String(household.children.length)} l={household.children.length === 1 ? 'Child' : 'Kids'} acc="var(--orange)" />
+        <Stat n={zipCount != null ? String(zipCount) : '—'} l={`Team ${household.zip}`} acc="var(--teal)" />
+        <Stat n={household.referral_code} l="Referral code" acc="var(--pink)" mono />
+      </div>
+
+      <Card>
+        <div className="flex items-center justify-between">
+          <h2 className="font-display text-xl font-bold">Your competitors</h2>
+          <a href={invite || '#'} className="font-mono text-xs font-bold uppercase tracking-wide text-[var(--orange)] hover:underline">+ Add a child</a>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {household.children.length === 0
+            ? <p className="text-[var(--dim)]">No children on file yet.</p>
+            : household.children.map((c) => <ChildCard key={c.id} child={c} />)}
+        </div>
+      </Card>
+
+      <div className="grid gap-5 sm:grid-cols-2">
+        <Card>
+          <div className="flex items-center gap-2">
+            <span className="live-dot h-2.5 w-2.5 rounded-full bg-[var(--green)]" />
+            <h2 className="font-display text-xl font-bold">Team {household.zip}</h2>
+          </div>
+          <p className="mt-3 text-[var(--dim)]">
+            <b className="text-[var(--ink)]">{zipCount ?? '—'} {zipCount === 1 ? 'family' : 'families'}</b> on your zip’s team so far.
+            Every zip hands out <b className="text-[var(--ink)]">3 × $1,000</b> prizes: top math, top reader, hardest worker.
+          </p>
+          <p className="mt-3 text-sm text-[var(--dim)]">Fill out your zip and your kids race fewer people for those local prizes.</p>
+        </Card>
+        <Card>
+          <h2 className="font-display text-xl font-bold">Invite &amp; earn referrals</h2>
+          <p className="mt-2 text-sm text-[var(--dim)]">Share your link so friends count as your referrals when they sign up.</p>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <input readOnly value={invite} aria-label="Invite link"
+              className="min-w-0 flex-1 rounded-xl border border-[var(--line)] bg-white px-3 py-2.5 text-sm" />
+            <button type="button" onClick={onCopy}
+              className="rounded-xl bg-[var(--ink)] px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90">
+              {copied ? 'Copied ✓' : 'Copy link'}
+            </button>
+          </div>
+        </Card>
+      </div>
+
+      <Card>
+        <h2 className="font-display text-xl font-bold">Your next steps</h2>
+        <ul className="mt-4 space-y-3">
+          <Step done label="Registration submitted" sub={`${household.children.length} ${household.children.length === 1 ? 'child' : 'children'} on file`} />
+          <Step done={!household.coppa_required} label="Sign consent forms"
+            sub={under13.length ? `Required for ${under13.map((c) => c.full_name.split(' ')[0]).join(', ')} (under 13). We’ll email the forms.` : 'No under-13 consent needed.'} />
+          <Step label="Set up TimeBack accounts" sub="We’ll email a setup link for each child before Oct 5." />
+          <Step label="Take the baseline assessment" sub="Unlocks on Oct 5, the starting line." />
+        </ul>
+      </Card>
+
+      <Card>
+        <h2 className="font-display text-xl font-bold">What your kids are playing for</h2>
+        <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <Prize amt="$100K" acc="var(--orange)" label="Grand crown" sub="Top math or reading, metro-wide" />
+          <Prize amt="$10K" acc="var(--orange)" label="Grade champion" sub="Best in their grade" />
+          <Prize amt="$50K" acc="var(--yellow)" label="Effort grand" sub="Most TimeBack XP, any kid" />
+          <Prize amt="$1K×3" acc="var(--teal)" label="Zip prizes" sub={`In team ${household.zip}`} />
+        </div>
+      </Card>
     </div>
   )
+}
+
+/* ------------------------------- pieces ------------------------------- */
+
+const inputCls = 'mt-1.5 w-full rounded-xl border border-[var(--line)] bg-white px-3.5 py-3 outline-none transition focus:border-[var(--orange)] focus:ring-2 focus:ring-[var(--orange)]/20'
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return <label className="block"><span className="text-sm font-medium">{label}</span>{children}</label>
+}
+
+function Alert({ kind, children }: { kind: 'err' | 'ok'; children: React.ReactNode }) {
+  return <p className={`rounded-lg px-3 py-2.5 text-sm ${kind === 'err' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`}>{children}</p>
+}
+
+function PrimaryBtn({ busy, children }: { busy?: boolean; children: React.ReactNode }) {
+  return (
+    <button type="submit" disabled={busy}
+      className="w-full rounded-xl bg-[var(--ink)] px-4 py-3.5 font-semibold text-white transition hover:opacity-90 disabled:opacity-60">
+      {busy ? 'Working…' : children}
+    </button>
+  )
+}
+
+function AuthShell({ children, subtitle }: { children: React.ReactNode; subtitle?: string }) {
+  return (
+    <div className="grid min-h-screen place-items-center px-5 py-10">
+      <div className="w-full max-w-md">
+        <div className="mb-6 flex justify-center"><Wordmark /></div>
+        <div className="overflow-hidden rounded-3xl border border-[var(--line)] bg-[var(--card)] shadow-[0_30px_80px_-40px_rgba(60,40,10,0.5)]">
+          <div className="h-1.5 w-full bg-gradient-to-r from-[var(--orange)] via-[var(--pink)] to-[var(--teal)]" />
+          <div className="p-7 sm:p-8">
+            {subtitle ? <p className="font-mono text-xs font-bold uppercase tracking-[0.16em] text-[var(--orange)]">{subtitle}</p> : null}
+            <div className={subtitle ? 'mt-4' : ''}>{children}</div>
+          </div>
+        </div>
+        <p className="mt-5 text-center font-mono text-[11px] uppercase tracking-wider text-[var(--dim2)]">Austin Speedrun · GT School</p>
+      </div>
+    </div>
+  )
+}
+
+function TopBar({ email, onSignOut, demo }: { email?: string | null; onSignOut: () => void; demo?: boolean }) {
+  return (
+    <header className="flex items-center justify-between gap-4">
+      <Wordmark small />
+      <div className="flex items-center gap-3">
+        {email ? <span className="hidden text-sm text-[var(--dim)] sm:inline">{email}</span> : null}
+        {demo
+          ? <span className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 font-mono text-xs font-bold uppercase text-[var(--dim)]">Demo</span>
+          : <button type="button" onClick={onSignOut} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm font-medium transition hover:bg-[var(--bg2)]">Sign out</button>}
+      </div>
+    </header>
+  )
+}
+
+function Wordmark({ small }: { small?: boolean }) {
+  return (
+    <div className="flex items-center gap-2.5">
+      <span className={`grid place-items-center rounded-xl bg-[var(--ink)] font-display font-bold text-white ${small ? 'h-9 w-9 text-lg' : 'h-12 w-12 text-2xl'}`}>S</span>
+      <div className="leading-tight">
+        <div className={`font-display font-bold tracking-tight ${small ? 'text-base' : 'text-xl'}`}>AUSTIN <span className="text-[var(--orange)]">SPEEDRUN</span></div>
+        <div className="font-mono text-[9px] uppercase tracking-[0.14em] text-[var(--dim)]">Parent Portal · GT School</div>
+      </div>
+    </div>
+  )
+}
+
+function ChildCard({ child }: { child: Child }) {
+  const age = ageFromDob(child.date_of_birth)
+  const under13 = age != null && age < 13
+  return (
+    <div className="rounded-2xl border border-[var(--line)] bg-[var(--card2)] p-4 transition hover:shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div className="font-display text-lg font-bold">{child.full_name}</div>
+        {under13
+          ? <span className="whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800">Consent needed</span>
+          : <span className="whitespace-nowrap rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-emerald-800">Ready</span>}
+      </div>
+      <div className="mt-1.5 text-sm text-[var(--dim)]">{[child.grade, child.school_name].filter(Boolean).join(' · ')}</div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <Pill>{child.school_type || 'School'}</Pill>
+        {age != null ? <Pill>Age {age}</Pill> : null}
+        <Pill>{child.has_home_device ? 'Device ✓' : 'No device'}</Pill>
+      </div>
+    </div>
+  )
+}
+
+function Pill({ children }: { children: React.ReactNode }) {
+  return <span className="rounded-md bg-[var(--bg2)] px-2 py-1 font-mono text-[11px] font-medium text-[var(--dim)]">{children}</span>
+}
+
+function Stat({ n, l, acc, mono }: { n: string; l: string; acc: string; mono?: boolean }) {
+  return (
+    <div className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4">
+      <span className="absolute left-0 top-0 h-1 w-full" style={{ background: acc }} />
+      <div className={`font-display font-bold ${mono ? 'font-mono text-lg tracking-tight' : 'text-2xl sm:text-3xl'}`} style={{ color: acc }}>{n}</div>
+      <div className="mt-1.5 font-mono text-[10px] uppercase tracking-wide text-[var(--dim)] sm:text-[11px]">{l}</div>
+    </div>
+  )
+}
+
+function CountUnit({ n, l }: { n: number; l: string }) {
+  return (
+    <div className="flex flex-col items-center">
+      <span className="font-display text-4xl font-bold tabular-nums text-[var(--yellow)] sm:text-5xl">{String(n).padStart(2, '0')}</span>
+      <span className="mt-1 font-mono text-[10px] uppercase tracking-wider text-white/45">{l}</span>
+    </div>
+  )
+}
+function Sep() { return <span className="font-display pb-6 text-2xl font-bold text-white/25">:</span> }
+
+function Step({ done, label, sub }: { done?: boolean; label: string; sub?: string }) {
+  return (
+    <li className="flex gap-3">
+      <span className={`mt-0.5 grid h-6 w-6 flex-none place-items-center rounded-full text-xs font-bold ${done ? 'bg-[var(--green)] text-white' : 'border-2 border-[var(--line2)] text-transparent'}`}>✓</span>
+      <div>
+        <div className={`font-semibold ${done ? 'text-[var(--dim)] line-through' : ''}`}>{label}</div>
+        {sub ? <div className="text-sm text-[var(--dim)]">{sub}</div> : null}
+      </div>
+    </li>
+  )
+}
+
+function Prize({ amt, acc, label, sub }: { amt: string; acc: string; label: string; sub: string }) {
+  return (
+    <div className="rounded-2xl border border-[var(--line)] bg-[var(--card2)] p-4">
+      <div className="font-display text-2xl font-bold" style={{ color: acc }}>{amt}</div>
+      <div className="mt-1 font-semibold">{label}</div>
+      <div className="mt-0.5 text-xs text-[var(--dim)]">{sub}</div>
+    </div>
+  )
+}
+
+function Card({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return <div className={`rounded-2xl border border-[var(--line)] bg-[var(--card)] p-6 shadow-sm ${className}`}>{children}</div>
 }
