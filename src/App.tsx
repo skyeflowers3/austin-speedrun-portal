@@ -224,7 +224,7 @@ export default function App() {
           </button>
         </div>
         <p className="mt-5 text-xs leading-relaxed text-[var(--dim2)]">
-          Use the same email you registered with on the Speedrun site so we can load your kids.
+          Log in with the same email you used to sign up for the Speedrun, so we can pull up your family’s registration.
         </p>
       </AuthShell>
     )
