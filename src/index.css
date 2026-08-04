@@ -2,11 +2,20 @@
 
 :root {
   --bg: #fdf6ec;
+  --bg2: #f6ecdc;
   --ink: #001117;
   --dim: #4b5560;
+  --dim2: #8f9296;
   --orange: #d9741c;
+  --pink: #c65c8a;
+  --yellow: #e6a100;
+  --teal: #159fbe;
+  --green: #12a15c;
+  --pos: #12a15c;
   --line: #e7d8c1;
+  --line2: #e0cfb4;
   --card: #fffbf3;
+  --card2: #ffffff;
   font-family: "General Sans", system-ui, sans-serif;
   color: var(--ink);
   background: var(--bg);
@@ -17,8 +26,9 @@ body {
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   background:
-    radial-gradient(46% 28% at 90% 0%, rgba(217, 116, 28, 0.18), transparent 70%),
-    radial-gradient(40% 24% at 8% 16%, rgba(198, 92, 138, 0.12), transparent 70%),
+    radial-gradient(46% 30% at 92% 0%, rgba(217, 116, 28, 0.16), transparent 70%),
+    radial-gradient(40% 26% at 6% 14%, rgba(21, 159, 190, 0.12), transparent 70%),
+    radial-gradient(44% 34% at 96% 82%, rgba(198, 92, 138, 0.1), transparent 70%),
     var(--bg);
 }
 
@@ -28,4 +38,17 @@ body {
 
 .font-display {
   font-family: "Clash Display", system-ui, sans-serif;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@keyframes portalpulse {
+  0% { box-shadow: 0 0 0 0 rgba(18, 161, 92, 0.5); }
+  70% { box-shadow: 0 0 0 7px rgba(18, 161, 92, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(18, 161, 92, 0); }
+}
+.live-dot {
+  animation: portalpulse 2s infinite;
 }
