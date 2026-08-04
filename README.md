@@ -1,19 +1,19 @@
 # Austin Speedrun — Parent portal
 
-Parent-facing dashboard after Speedrun signup. Same Supabase project as the [marketing site](../austin-speedrun) and [tracker](../austin-speedrun-tracker).
+Parent dashboard after Speedrun registration. Same Supabase project as the [marketing site](../austin-speedrun) and [tracker](../austin-speedrun-tracker).
 
-**MVP:** magic-link login → kids on file + referral code / invite link.
+**Auth:** email + password for day-to-day login. First-time / forgot-password uses a one-time set-up link (Supabase recovery email).
 
 ## How login works
 
-1. Parent registers on `parents.html#join` (success screen unchanged).
-2. Supabase Auth emails a **magic link** to the portal (built-in — no Resend).
-3. Parent opens the **stable portal URL** (this app). Bookmark it.
-4. If signed out later, enter email here to get a **new** magic link.
+1. Parent registers on the marketing site (same email).
+2. Open this portal → enter email → **Email me a set-up link** → set a password.
+3. Later visits → **Log in** with that email/password.
+4. Demo Season Hub: open `/?demo` (no Supabase required).
 
 ## Setup
 
-1. In Supabase SQL Editor, run [`../austin-speedrun-tracker/supabase/patch-portal-auth.sql`](../austin-speedrun-tracker/supabase/patch-portal-auth.sql).
+1. Run [`../austin-speedrun-tracker/supabase/patch-portal-auth.sql`](../austin-speedrun-tracker/supabase/patch-portal-auth.sql) in the SQL Editor.
 2. Supabase → Authentication → URL configuration:
    - **Site URL:** `http://localhost:5173` (local) or your deployed portal URL
    - **Redirect URLs:** add `http://localhost:5173/**` (and production later)
@@ -21,7 +21,7 @@ Parent-facing dashboard after Speedrun signup. Same Supabase project as the [mar
 
 ```bash
 cp .env.example .env
-# paste same VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY as the tracker
+# same VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY as the tracker
 npm install
 npm run dev
 ```
@@ -32,11 +32,6 @@ npm run dev
 
 | Command | |
 | --- | --- |
-| `npm run dev` | Local portal (default http://localhost:5173) |
+| `npm run dev` | http://localhost:5173 |
 | `npm run build` | Production build |
-
-## Notes
-
-- No Resend / Edge Function required for login emails.
-- `provision-portal-login` in the tracker repo is unused for now (password-email experiment).
-- Open anon RLS on `participants` / `children` still exists for the staff Tracker; tighten before public launch.
+| `./deploy.sh` | Deploy `dist/` to the S3 website bucket |
