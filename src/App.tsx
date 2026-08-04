@@ -3,7 +3,8 @@ import type { Session } from '@supabase/supabase-js'
 import { inviteUrlForCode, isSupabaseConfigured, supabase } from './lib/supabase'
 import type { Child, Household } from './types'
 
-type View = 'loading' | 'login' | 'setpw' | 'dashboard' | 'unconfigured'
+type View = 'loading' | 'auth' | 'dashboard' | 'unconfigured'
+type AuthMode = 'signin' | 'create'
 
 const SEASON_START = new Date('2026-10-05T00:00:00-05:00')
 
@@ -49,16 +50,16 @@ function useCountdown(target: Date) {
 }
 
 const isDemo = new URLSearchParams(window.location.search).has('demo')
-const hasPassword = (s: Session | null) => Boolean(s?.user?.user_metadata?.password_set)
 
 export default function App() {
   const [view, setView] = useState<View>(
     isDemo ? 'dashboard' : isSupabaseConfigured ? 'loading' : 'unconfigured',
   )
+  const [authMode, setAuthMode] = useState<AuthMode>('signin')
   const [session, setSession] = useState<Session | null>(null)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [msg, setMsg] = useState('')
+  const [password2, setPassword2] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [household, setHousehold] = useState<Household | null>(isDemo ? DEMO_HOUSEHOLD : null)
@@ -73,7 +74,7 @@ export default function App() {
     if (error) {
       setDashErr(
         /no registration found/i.test(error.message)
-          ? 'We couldn’t find a Speedrun registration for this email. Sign in with the same email you registered with.'
+          ? 'No Speedrun registration found for this email. Register on the main site first, then create a portal password here.'
           : error.message,
       )
       setHousehold(null)
@@ -94,12 +95,11 @@ export default function App() {
     if (isDemo || !supabase) return
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session)
-      setView(data.session ? (hasPassword(data.session) ? 'dashboard' : 'setpw') : 'login')
+      setView(data.session ? 'dashboard' : 'auth')
     })
-    const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
-      if (event === 'PASSWORD_RECOVERY') { setView('setpw'); setSession(next); return }
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
       setSession(next)
-      setView(next ? (hasPassword(next) ? 'dashboard' : 'setpw') : 'login')
+      setView(next ? 'dashboard' : 'auth')
     })
     return () => sub.subscription.unsubscribe()
   }, [])
@@ -108,61 +108,128 @@ export default function App() {
     if (!isDemo && view === 'dashboard' && session) void loadHousehold()
   }, [view, session, loadHousehold])
 
-  function resetMessages() { setErr(''); setMsg('') }
-
-  async function login(e: React.FormEvent) {
-    e.preventDefault()
-    if (!supabase) return
-    resetMessages()
-    const mail = email.trim().toLowerCase()
-    if (!mail.includes('@')) return setErr('Enter a valid email.')
-    if (!password) return setErr('Enter your password.')
-    setBusy(true)
-    const { error } = await supabase.auth.signInWithPassword({ email: mail, password })
-    setBusy(false)
+  async function ensureHouseholdOrSignOut() {
+    if (!supabase) return false
+    const { error } = await supabase.rpc('get_my_household')
     if (error) {
-      setErr(/invalid login/i.test(error.message)
-        ? 'That email or password didn’t work. First time here? Use “Email me a set-up link” below.'
-        : error.message)
+      await supabase.auth.signOut()
+      setErr(
+        /no registration found/i.test(error.message)
+          ? 'No Speedrun registration for that email. Register on the main site first.'
+          : error.message,
+      )
+      return false
     }
+    return true
   }
 
-  async function emailSetupLink() {
-    if (!supabase) return
-    resetMessages()
-    const mail = email.trim().toLowerCase()
-    if (!mail.includes('@')) return setErr('Enter your email above first.')
-    setBusy(true)
-    const { error } = await supabase.auth.resetPasswordForEmail(mail, { redirectTo: window.location.origin })
-    setBusy(false)
-    if (error) return setErr(error.message)
-    setMsg(`Sent. Check ${mail} for a link to set your password.`)
-  }
-
-  async function saveNewPassword(e: React.FormEvent) {
+  async function onAuthSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!supabase) return
-    resetMessages()
-    if (password.length < 8) return setErr('Use at least 8 characters.')
+    setErr('')
+    const mail = email.trim().toLowerCase()
+    if (!mail.includes('@') || !password) {
+      setErr('Enter email and password.')
+      return
+    }
+
     setBusy(true)
-    const { error } = await supabase.auth.updateUser({ password, data: { password_set: true } })
-    setBusy(false)
-    if (error) return setErr(error.message)
-    setPassword('')
-    setView('dashboard')
+    try {
+      if (authMode === 'create') {
+        if (password.length < 8) {
+          setErr('Use at least 8 characters.')
+          return
+        }
+        if (password !== password2) {
+          setErr('Passwords do not match.')
+          return
+        }
+
+        // Prefer admin set-password when the Auth user already exists so we
+        // don't show a bare "User already registered".
+        const provisioned = await supabase.functions.invoke('set-portal-password', {
+          body: { email: mail, password },
+        })
+        const provisionBody =
+          typeof provisioned.data === 'string'
+            ? JSON.parse(provisioned.data)
+            : provisioned.data
+
+        if (!provisioned.error && provisionBody?.ok) {
+          const { error: signErr } = await supabase.auth.signInWithPassword({
+            email: mail,
+            password,
+          })
+          if (signErr) {
+            setErr(signErr.message)
+            return
+          }
+          await ensureHouseholdOrSignOut()
+          return
+        }
+
+        if (provisionBody?.error && /no registration found/i.test(String(provisionBody.error))) {
+          setErr('No Speedrun registration for that email. Register on the main site first.')
+          return
+        }
+
+        // Fallback: brand-new Auth user (requires Confirm email OFF in Supabase)
+        const { data, error } = await supabase.auth.signUp({
+          email: mail,
+          password,
+        })
+        if (error) {
+          if (/already|registered|exists/i.test(error.message)) {
+            setErr(
+              'This email already has a portal login. Use Sign in, or deploy the set-portal-password function to reset.',
+            )
+          } else {
+            setErr(error.message)
+          }
+          return
+        }
+        if (!data.session) {
+          setErr(
+            'Account created, but email confirmation is still on. In Supabase → Sign In / Providers → User Signups, turn off “Confirm email”, then change to Sign in.',
+          )
+          return
+        }
+        await ensureHouseholdOrSignOut()
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: mail,
+          password,
+        })
+        if (error) {
+          setErr(
+            /invalid login/i.test(error.message)
+              ? 'That email or password didn’t work. First time? Use Create password.'
+              : error.message,
+          )
+          return
+        }
+        await ensureHouseholdOrSignOut()
+      }
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function signOut() {
     if (!supabase) return
     await supabase.auth.signOut()
-    setHousehold(null); setZipCount(null); setPassword('')
+    setHousehold(null)
+    setZipCount(null)
+    setPassword('')
+    setPassword2('')
   }
 
   async function copyInvite() {
     if (!household?.referral_code) return
     try {
       await navigator.clipboard.writeText(inviteUrlForCode(household.referral_code))
-      setCopied(true); setTimeout(() => setCopied(false), 2000)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
     } catch { /* ignore */ }
   }
 
@@ -182,49 +249,94 @@ export default function App() {
     return <div className="grid min-h-screen place-items-center text-[var(--dim)]">Loading…</div>
   }
 
-  if (view === 'setpw') {
+  if (view === 'auth') {
     return (
-      <AuthShell subtitle="Set your portal password">
-        <p className="text-[var(--dim)]">You’re verified. Pick a password and you’ll use it to log in from now on.</p>
-        <form onSubmit={saveNewPassword} className="mt-5 space-y-4">
-          <Field label="Create a password">
-            <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
-              className={inputCls} placeholder="At least 8 characters" required />
-          </Field>
-          {err ? <Alert kind="err">{err}</Alert> : null}
-          {msg ? <Alert kind="ok">{msg}</Alert> : null}
-          <PrimaryBtn busy={busy}>Save password &amp; continue</PrimaryBtn>
-        </form>
-      </AuthShell>
-    )
-  }
+      <AuthShell subtitle="Parent portal">
+        <p className="text-[var(--dim)] leading-relaxed">
+          {authMode === 'signin'
+            ? 'Sign in with the email and password you created for the portal.'
+            : 'First time? Use the same email you registered with, and choose a password. No email link required.'}
+        </p>
 
-  if (view === 'login') {
-    return (
-      <AuthShell subtitle="Log in to your season">
-        <form onSubmit={login} className="space-y-4">
-          <Field label="Email">
-            <input type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              className={inputCls} placeholder="you@example.com" required />
-          </Field>
-          <Field label="Password">
-            <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)}
-              className={inputCls} placeholder="Your password" required />
-          </Field>
-          {err ? <Alert kind="err">{err}</Alert> : null}
-          {msg ? <Alert kind="ok">{msg}</Alert> : null}
-          <PrimaryBtn busy={busy}>Log in</PrimaryBtn>
-        </form>
-        <div className="mt-5 rounded-xl border border-[var(--line)] bg-[var(--bg2)] p-4">
-          <p className="text-sm font-semibold">First time, or forgot your password?</p>
-          <p className="mt-1 text-sm text-[var(--dim)]">Enter your email above, then get a one-time link to set it.</p>
-          <button type="button" onClick={() => void emailSetupLink()} disabled={busy}
-            className="mt-3 w-full rounded-xl border border-[var(--line2)] bg-white px-4 py-2.5 text-sm font-semibold transition hover:bg-white/60 disabled:opacity-60">
-            Email me a set-up link
+        <div className="mt-5 flex gap-2 rounded-xl bg-[rgba(0,0,0,0.04)] p-1">
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode('signin')
+              setErr('')
+              setPassword('')
+              setPassword2('')
+            }}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+              authMode === 'signin' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
+            }`}
+          >
+            Sign in
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAuthMode('create')
+              setErr('')
+              setPassword('')
+              setPassword2('')
+            }}
+            className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${
+              authMode === 'create' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
+            }`}
+          >
+            Create password
           </button>
         </div>
+
+        <form onSubmit={onAuthSubmit} className="mt-5 space-y-4" autoComplete="off">
+          <Field label="Email">
+            <input
+              type="email"
+              name="asr-portal-email"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className={inputCls}
+              placeholder="you@example.com"
+              required
+            />
+          </Field>
+          <Field label="Password">
+            <input
+              type="password"
+              name="asr-portal-password"
+              autoComplete="new-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className={inputCls}
+              placeholder={authMode === 'create' ? 'At least 8 characters' : 'Your password'}
+              required
+            />
+          </Field>
+          {authMode === 'create' ? (
+            <Field label="Confirm password">
+              <input
+                type="password"
+                name="asr-portal-password-confirm"
+                autoComplete="new-password"
+                value={password2}
+                onChange={(e) => setPassword2(e.target.value)}
+                className={inputCls}
+                required
+              />
+            </Field>
+          ) : null}
+          {err ? <Alert kind="err">{err}</Alert> : null}
+          <PrimaryBtn busy={busy}>
+            {authMode === 'create' ? 'Create password' : 'Sign in'}
+          </PrimaryBtn>
+        </form>
         <p className="mt-5 text-xs leading-relaxed text-[var(--dim2)]">
-          Log in with the same email you used to sign up for the Speedrun, so we can pull up your family’s registration.
+          Only emails that registered for the Speedrun can create a portal login.
         </p>
       </AuthShell>
     )
