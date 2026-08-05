@@ -425,7 +425,6 @@ function Dashboard({ household, zipCount, onCopy, copied }: { household: Househo
             <b className="text-[var(--ink)]">{zipCount ?? '—'} {zipCount === 1 ? 'family' : 'families'}</b> on your zip’s team so far.
             Every zip hands out <b className="text-[var(--ink)]">3 × $1,000</b> prizes: top math, top reader, hardest worker.
           </p>
-          <p className="mt-3 text-sm text-[var(--dim)]">Fill out your zip and your kids race fewer people for those local prizes.</p>
         </Card>
         <Card>
           <h2 className="font-display text-xl font-bold">Invite &amp; earn referrals</h2>
