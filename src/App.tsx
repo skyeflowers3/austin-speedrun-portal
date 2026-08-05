@@ -209,11 +209,37 @@ export default function App() {
 
   async function copyInvite() {
     if (!household?.referral_code) return
+    const text = inviteUrlForCode(household.referral_code)
+    // Clipboard API needs a secure context (HTTPS/localhost). The S3 website is HTTP,
+    // so fall back to execCommand when writeText is unavailable or throws.
+    let ok = false
     try {
-      await navigator.clipboard.writeText(inviteUrlForCode(household.referral_code))
+      if (navigator.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(text)
+        ok = true
+      }
+    } catch {
+      /* fall through */
+    }
+    if (!ok) {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      try {
+        ok = document.execCommand('copy')
+      } catch {
+        ok = false
+      }
+      document.body.removeChild(ta)
+    }
+    if (ok) {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
-    } catch { /* ignore */ }
+    }
   }
 
   if (view === 'unconfigured') {
