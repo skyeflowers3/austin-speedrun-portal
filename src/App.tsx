@@ -145,8 +145,7 @@ export default function App() {
           return
         }
 
-        // Prefer admin set-password when the Auth user already exists so we
-        // don't show a bare "User already registered".
+        // Only registered participants can create a portal password (server-side check).
         const provisioned = await supabase.functions.invoke('set-portal-password', {
           body: { email: mail, password },
         })
@@ -173,43 +172,27 @@ export default function App() {
           return
         }
 
-        // Fallback: brand-new Auth user (requires Confirm email OFF in Supabase)
-        const { data, error } = await supabase.auth.signUp({
-          email: mail,
-          password,
-        })
-        if (error) {
-          if (/already|registered|exists/i.test(error.message)) {
-            setErr(
-              'This email already has a portal login. Use Sign in, or deploy the set-portal-password function to reset.',
-            )
-          } else {
-            setErr(error.message)
-          }
-          return
-        }
-        if (!data.session) {
-          setErr(
-            'Account created, but email confirmation is still on. In Supabase → Sign In / Providers → User Signups, turn off “Confirm email”, then change to Sign in.',
-          )
-          return
-        }
-        await ensureHouseholdOrSignOut()
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: mail,
-          password,
-        })
-        if (error) {
-          setErr(
-            /invalid login/i.test(error.message)
-              ? 'That email or password didn’t work. First time? Use Create password.'
-              : error.message,
-          )
-          return
-        }
-        await ensureHouseholdOrSignOut()
+        setErr(
+          provisionBody?.error ||
+            provisioned.error?.message ||
+            'Could not create portal password. Try again, or ask staff to deploy set-portal-password.',
+        )
+        return
       }
+
+      const { error } = await supabase.auth.signInWithPassword({
+        email: mail,
+        password,
+      })
+      if (error) {
+        setErr(
+          /invalid login/i.test(error.message)
+            ? 'That email or password didn’t work. First time? Use Create password.'
+            : error.message,
+        )
+        return
+      }
+      await ensureHouseholdOrSignOut()
     } finally {
       setBusy(false)
     }
@@ -255,7 +238,7 @@ export default function App() {
         <p className="text-[var(--dim)] leading-relaxed">
           {authMode === 'signin'
             ? 'Sign in with the email and password you created for the portal.'
-            : 'First time? Use the same email you registered with, and choose a password. No email link required.'}
+            : 'First time? Use the same email you registered with, and choose a password. No email required.'}
         </p>
 
         <div className="mt-5 flex gap-2 rounded-xl bg-[rgba(0,0,0,0.04)] p-1">
