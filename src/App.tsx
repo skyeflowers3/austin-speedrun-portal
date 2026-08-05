@@ -187,7 +187,7 @@ export default function App() {
       if (error) {
         setErr(
           /invalid login/i.test(error.message)
-            ? 'That email or password didn’t work. First time? Use Create password.'
+            ? 'That email or password didn’t work. First time? Tap Sign up.'
             : error.message,
         )
         return
@@ -237,7 +237,7 @@ export default function App() {
       <AuthShell subtitle="Parent portal">
         <p className="text-[var(--dim)] leading-relaxed">
           {authMode === 'signin'
-            ? 'Sign in with the email and password you created for the portal.'
+            ? 'Log in with the email and password you created for the portal.'
             : 'First time? Use the same email you registered with, and choose a password. No email required.'}
         </p>
 
@@ -254,7 +254,7 @@ export default function App() {
               authMode === 'signin' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
             }`}
           >
-            Sign in
+            Log in
           </button>
           <button
             type="button"
@@ -268,7 +268,7 @@ export default function App() {
               authMode === 'create' ? 'bg-white shadow-sm' : 'text-[var(--dim)]'
             }`}
           >
-            Create password
+            Sign up
           </button>
         </div>
 
@@ -315,7 +315,7 @@ export default function App() {
           ) : null}
           {err ? <Alert kind="err">{err}</Alert> : null}
           <PrimaryBtn busy={busy}>
-            {authMode === 'create' ? 'Create password' : 'Sign in'}
+            {authMode === 'create' ? 'Sign up' : 'Log in'}
           </PrimaryBtn>
         </form>
         <p className="mt-5 text-xs leading-relaxed text-[var(--dim2)]">
