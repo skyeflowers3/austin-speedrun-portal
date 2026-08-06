@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { inviteUrlForCode, isSupabaseConfigured, supabase } from './lib/supabase'
 import type { Child, Household } from './types'
@@ -16,10 +16,55 @@ const DEMO_HOUSEHOLD: Household = {
   status: 'registered',
   referral_code: 'SPD-7K2Q',
   coppa_required: true,
+  referral_count: 0,
+  referral_count_month: 0,
   children: [
     { id: '1', full_name: 'Maya Wang', grade: '7th', date_of_birth: '2013-05-12', school_name: 'Kealing Middle School', school_type: 'Public', student_email: 'maya@example.com', accommodations: null, has_home_device: true },
     { id: '2', full_name: 'Leo Wang', grade: '6th', date_of_birth: '2014-09-03', school_name: 'Kealing Middle School', school_type: 'Public', student_email: null, accommodations: null, has_home_device: true },
   ],
+}
+
+const INVITE_SHARE_MESSAGE =
+  'Join us in the Austin Speedrun — a free middle-school contest with real prizes. Sign up with my link:'
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    /* fall through */
+  }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  ta.setSelectionRange(0, text.length)
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(ta)
+  return ok
+}
+
+function canNativeShare(data: ShareData): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.share !== 'function') return false
+  if (typeof navigator.canShare === 'function') {
+    try {
+      return navigator.canShare(data)
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 function ageFromDob(dob: string | null): number | null {
@@ -63,33 +108,43 @@ export default function App() {
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const [household, setHousehold] = useState<Household | null>(isDemo ? DEMO_HOUSEHOLD : null)
-  const [zipCount, setZipCount] = useState<number | null>(isDemo ? 41 : null)
   const [dashErr, setDashErr] = useState('')
   const [copied, setCopied] = useState(false)
+  const [showChangePassword, setShowChangePassword] = useState(false)
+
+  /** PostgREST occasionally rejects a brand-new Auth JWT as "issued at future" (tiny clock skew). */
+  const rpcHousehold = useCallback(async () => {
+    if (!supabase) return { data: null, error: new Error('Supabase not configured') }
+    const delays = [0, 1500, 3000]
+    let last: { data: unknown; error: { message: string } | null } = { data: null, error: null }
+    for (const ms of delays) {
+      if (ms) await new Promise((r) => setTimeout(r, ms))
+      const res = await supabase.rpc('get_my_household')
+      last = res
+      if (!res.error) return res
+      if (!/issued at future/i.test(res.error.message)) return res
+    }
+    return last
+  }, [])
 
   const loadHousehold = useCallback(async () => {
     if (!supabase) return
     setDashErr('')
-    const { data, error } = await supabase.rpc('get_my_household')
+    const { data, error } = await rpcHousehold()
     if (error) {
       setDashErr(
         /no registration found/i.test(error.message)
           ? 'No Speedrun registration found for this email. Register on the main site first, then create a portal password here.'
-          : error.message,
+          : /issued at future/i.test(error.message)
+            ? 'Login worked, but the session needs a second to settle. Tap Try again.'
+            : error.message,
       )
       setHousehold(null)
       return
     }
     const row = (typeof data === 'string' ? JSON.parse(data) : data) as Household
     setHousehold(row)
-    if (row?.zip) {
-      const { count } = await supabase
-        .from('participants')
-        .select('id', { count: 'exact', head: true })
-        .eq('zip', row.zip)
-      setZipCount(count ?? null)
-    }
-  }, [])
+  }, [rpcHousehold])
 
   useEffect(() => {
     if (isDemo || !supabase) return
@@ -110,8 +165,12 @@ export default function App() {
 
   async function ensureHouseholdOrSignOut() {
     if (!supabase) return false
-    const { error } = await supabase.rpc('get_my_household')
+    const { error } = await rpcHousehold()
     if (error) {
+      if (/issued at future/i.test(error.message)) {
+        // Session is valid; dashboard load will retry. Don't sign them out.
+        return true
+      }
       await supabase.auth.signOut()
       setErr(
         /no registration found/i.test(error.message)
@@ -202,7 +261,6 @@ export default function App() {
     if (!supabase) return
     await supabase.auth.signOut()
     setHousehold(null)
-    setZipCount(null)
     setPassword('')
     setPassword2('')
   }
@@ -210,33 +268,7 @@ export default function App() {
   async function copyInvite() {
     if (!household?.referral_code) return
     const text = inviteUrlForCode(household.referral_code)
-    // Clipboard API needs a secure context (HTTPS/localhost). The S3 website is HTTP,
-    // so fall back to execCommand when writeText is unavailable or throws.
-    let ok = false
-    try {
-      if (navigator.clipboard?.writeText && window.isSecureContext) {
-        await navigator.clipboard.writeText(text)
-        ok = true
-      }
-    } catch {
-      /* fall through */
-    }
-    if (!ok) {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.setAttribute('readonly', '')
-      ta.style.position = 'fixed'
-      ta.style.left = '-9999px'
-      document.body.appendChild(ta)
-      ta.select()
-      try {
-        ok = document.execCommand('copy')
-      } catch {
-        ok = false
-      }
-      document.body.removeChild(ta)
-    }
-    if (ok) {
+    if (await copyText(text)) {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     }
@@ -354,7 +386,20 @@ export default function App() {
   // DASHBOARD
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 py-8 sm:py-12">
-      <TopBar email={isDemo ? household?.email : session?.user?.email} onSignOut={() => void signOut()} demo={isDemo} />
+      <TopBar
+        email={isDemo ? household?.email : session?.user?.email}
+        onSignOut={() => void signOut()}
+        demo={isDemo}
+        onChangePassword={isDemo ? undefined : () => setShowChangePassword((v) => !v)}
+        changingPassword={showChangePassword}
+      />
+      {showChangePassword && !isDemo ? (
+        <ChangePasswordCard
+          className="mt-4"
+          onDone={() => setShowChangePassword(false)}
+          onCancel={() => setShowChangePassword(false)}
+        />
+      ) : null}
       {dashErr ? (
         <Card className="mt-6">
           <p className="text-red-700">{dashErr}</p>
@@ -363,7 +408,12 @@ export default function App() {
       ) : !household ? (
         <p className="mt-6 text-[var(--dim)]">Loading your registration…</p>
       ) : (
-        <Dashboard household={household} zipCount={zipCount} onCopy={() => void copyInvite()} copied={copied} />
+        <Dashboard
+          household={household}
+          onCopy={() => void copyInvite()}
+          copied={copied}
+          onChildrenChanged={() => void loadHousehold()}
+        />
       )}
     </div>
   )
@@ -371,11 +421,39 @@ export default function App() {
 
 /* ------------------------------- dashboard ------------------------------- */
 
-function Dashboard({ household, zipCount, onCopy, copied }: { household: Household; zipCount: number | null; onCopy: () => void; copied: boolean }) {
+const CHILD_GRADES = ['6th', '7th', '8th']
+const SCHOOL_TYPES = ['Public', 'Private', 'Charter', 'Microschool', 'Homeschool']
+
+function Dashboard({
+  household,
+  onCopy,
+  copied,
+  onChildrenChanged,
+}: {
+  household: Household
+  onCopy: () => void
+  copied: boolean
+  onChildrenChanged: () => void
+}) {
   const cd = useCountdown(SEASON_START)
   const invite = household.referral_code ? inviteUrlForCode(household.referral_code) : ''
   const first = household.parent_name?.split(' ')[0] || 'there'
   const under13 = household.children.filter((c) => (ageFromDob(c.date_of_birth) ?? 99) < 13)
+  const consentNeeded = household.coppa_required
+  const [showAddChild, setShowAddChild] = useState(false)
+
+  const nextSteps = (
+    <Card>
+      <h2 className="font-display text-xl font-bold">Your next steps</h2>
+      <ul className="mt-4 space-y-3">
+        <Step done label="Registration submitted" sub={`${household.children.length} ${household.children.length === 1 ? 'child' : 'children'} on file`} />
+        <Step done={!household.coppa_required} label="Sign consent forms"
+          sub={under13.length ? `Required for ${under13.map((c) => c.full_name.split(' ')[0]).join(', ')} (under 13). We’ll email the forms.` : 'No under-13 consent needed.'} />
+        <Step label="Set up TimeBack accounts" sub="We’ll email a setup link for each child before Oct 5." />
+        <Step label="Take the baseline assessment" sub="Unlocks on Oct 5, the starting line." />
+      </ul>
+    </Card>
+  )
 
   return (
     <div className="mt-6 space-y-5">
@@ -397,67 +475,105 @@ function Dashboard({ household, zipCount, onCopy, copied }: { household: Househo
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3 sm:gap-4">
-        <Stat n={String(household.children.length)} l={household.children.length === 1 ? 'Child' : 'Kids'} acc="var(--orange)" />
-        <Stat n={zipCount != null ? String(zipCount) : '—'} l={`Team ${household.zip}`} acc="var(--teal)" />
-        <Stat n={household.referral_code} l="Referral code" acc="var(--pink)" mono />
-      </div>
+      {consentNeeded ? nextSteps : null}
 
       <Card>
-        <div className="flex items-center justify-between">
-          <h2 className="font-display text-xl font-bold">Your competitors</h2>
-          <a href={invite || '#'} className="font-mono text-xs font-bold uppercase tracking-wide text-[var(--orange)] hover:underline">+ Add a child</a>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-display text-xl font-bold">Your kids</h2>
+          {!showAddChild ? (
+            <button
+              type="button"
+              onClick={() => setShowAddChild(true)}
+              className="font-mono text-xs font-bold uppercase tracking-wide text-[var(--orange)] hover:underline"
+            >
+              + Add a child
+            </button>
+          ) : null}
         </div>
+        {showAddChild ? (
+          <AddChildForm
+            onCancel={() => setShowAddChild(false)}
+            onSaved={() => {
+              setShowAddChild(false)
+              onChildrenChanged()
+            }}
+          />
+        ) : null}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
-          {household.children.length === 0
+          {household.children.length === 0 && !showAddChild
             ? <p className="text-[var(--dim)]">No children on file yet.</p>
             : household.children.map((c) => <ChildCard key={c.id} child={c} />)}
         </div>
       </Card>
 
-      <div className="grid gap-5 sm:grid-cols-2">
-        <Card>
-          <div className="flex items-center gap-2">
-            <span className="live-dot h-2.5 w-2.5 rounded-full bg-[var(--green)]" />
-            <h2 className="font-display text-xl font-bold">Team {household.zip}</h2>
-          </div>
-          <p className="mt-3 text-[var(--dim)]">
-            <b className="text-[var(--ink)]">{zipCount ?? '—'} {zipCount === 1 ? 'family' : 'families'}</b> on your zip’s team so far.
-            Every zip hands out <b className="text-[var(--ink)]">3 × $1,000</b> prizes: top math, top reader, hardest worker.
-          </p>
-        </Card>
-        <Card>
-          <h2 className="font-display text-xl font-bold">Invite &amp; earn referrals</h2>
-          <p className="mt-2 text-sm text-[var(--dim)]">Share your link so friends count as your referrals when they sign up.</p>
-          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-            <input readOnly value={invite} aria-label="Invite link"
-              className="min-w-0 flex-1 rounded-xl border border-[var(--line)] bg-white px-3 py-2.5 text-sm" />
-            <button type="button" onClick={onCopy}
-              className="rounded-xl bg-[var(--ink)] px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90">
-              {copied ? 'Copied ✓' : 'Copy link'}
-            </button>
-          </div>
-        </Card>
-      </div>
+      {consentNeeded ? null : nextSteps}
 
       <Card>
-        <h2 className="font-display text-xl font-bold">Your next steps</h2>
-        <ul className="mt-4 space-y-3">
-          <Step done label="Registration submitted" sub={`${household.children.length} ${household.children.length === 1 ? 'child' : 'children'} on file`} />
-          <Step done={!household.coppa_required} label="Sign consent forms"
-            sub={under13.length ? `Required for ${under13.map((c) => c.full_name.split(' ')[0]).join(', ')} (under 13). We’ll email the forms.` : 'No under-13 consent needed.'} />
-          <Step label="Set up TimeBack accounts" sub="We’ll email a setup link for each child before Oct 5." />
-          <Step label="Take the baseline assessment" sub="Unlocks on Oct 5, the starting line." />
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <h2 className="font-display text-xl font-bold">Invite a Friend</h2>
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              <b className="text-[var(--ink)]">{household.referral_count_month ?? 0}</b>
+              {' '}{(household.referral_count_month ?? 0) === 1 ? 'referral' : 'referrals'} this month
+              <span className="text-[var(--dim2)]">
+                {' · '}{household.referral_count ?? 0} season
+                {(household.referral_count ?? 0) === 1 ? ' referral' : ' referrals'}
+              </span>
+            </p>
+          </div>
+          <InfoTip
+            label="How referral prizes work"
+            body={
+              <>
+                A referral counts after your friend finishes the <b>baseline assessment</b> and
+                completes <b>5 hours on TimeBack</b>. Monthly raffle entries reset each month;
+                season referrals count toward the top-referrer prizes.
+              </>
+            }
+          />
+        </div>
+        <ul className="mt-3 space-y-1.5 text-sm text-[var(--dim)]">
+          <li>
+            <b className="text-[var(--ink)]">Top referrers:</b> win up to{' '}
+            <b className="text-[var(--orange)]">$5,000</b>{' '}
+            <span className="text-[var(--dim2)]">($5,000 / $3,000 / $2,000)</span>
+          </li>
+          <li>
+            <b className="text-[var(--ink)]">Monthly raffle:</b> each referral gets you and your
+            friend an entry to win <b className="text-[var(--teal)]">$1,000</b>
+          </li>
         </ul>
+        <InviteActions inviteUrl={invite} copied={copied} onCopy={onCopy} />
       </Card>
 
       <Card>
         <h2 className="font-display text-xl font-bold">What your kids are playing for</h2>
+        <p className="mt-1 text-sm text-[var(--dim)]">Score prizes use the final assessment. Effort prizes use TimeBack XP.</p>
         <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Prize amt="$100K" acc="var(--orange)" label="Grand crown" sub="Top math or reading, metro-wide" />
-          <Prize amt="$10K" acc="var(--orange)" label="Grade champion" sub="Best in their grade" />
-          <Prize amt="$50K" acc="var(--yellow)" label="Effort grand" sub="Most TimeBack XP, any kid" />
-          <Prize amt="$1K×3" acc="var(--teal)" label="Zip prizes" sub={`In team ${household.zip}`} />
+          <Prize
+            amt="2 × $100K"
+            acc="var(--orange)"
+            label="Final crowns"
+            sub="Highest final math & highest final reading"
+          />
+          <Prize
+            amt="6 × $10K"
+            acc="var(--orange)"
+            label="Grade finals"
+            sub="Top final math & reading in each grade"
+          />
+          <Prize
+            amt="$50K"
+            acc="var(--yellow)"
+            label="Effort grand"
+            sub="Most TimeBack XP over the whole season"
+          />
+          <Prize
+            amt="$5K / mo"
+            acc="var(--teal)"
+            label="Monthly effort"
+            sub="Most TimeBack XP that calendar month"
+          />
         </div>
       </Card>
     </div>
@@ -474,6 +590,60 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function Alert({ kind, children }: { kind: 'err' | 'ok'; children: React.ReactNode }) {
   return <p className={`rounded-lg px-3 py-2.5 text-sm ${kind === 'err' ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`}>{children}</p>
+}
+
+function InfoTip({ label, body }: { label: string; body: React.ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    function onPointerDown(e: MouseEvent | TouchEvent) {
+      const el = rootRef.current
+      if (el && !el.contains(e.target as Node)) setOpen(false)
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    document.addEventListener('touchstart', onPointerDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown)
+      document.removeEventListener('touchstart', onPointerDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className="relative shrink-0" ref={rootRef}>
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="grid h-6 w-6 place-items-center rounded-full border border-[var(--line)] bg-white text-xs font-bold text-[var(--dim)] transition hover:border-[var(--ink)] hover:text-[var(--ink)]"
+      >
+        i
+      </button>
+      {open ? (
+        <div
+          role="dialog"
+          aria-label={label}
+          className="absolute right-0 z-20 mt-2 w-[min(18.5rem,calc(100vw-3rem))] rounded-xl border border-[var(--line)] bg-white p-3 text-left text-xs leading-relaxed text-[var(--dim)] shadow-lg"
+        >
+          <p>{body}</p>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="mt-2 font-semibold text-[var(--orange)] hover:underline"
+          >
+            Got it
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 function PrimaryBtn({ busy, children }: { busy?: boolean; children: React.ReactNode }) {
@@ -503,17 +673,198 @@ function AuthShell({ children, subtitle }: { children: React.ReactNode; subtitle
   )
 }
 
-function TopBar({ email, onSignOut, demo }: { email?: string | null; onSignOut: () => void; demo?: boolean }) {
+function TopBar({
+  email,
+  onSignOut,
+  demo,
+  onChangePassword,
+  changingPassword,
+}: {
+  email?: string | null
+  onSignOut: () => void
+  demo?: boolean
+  onChangePassword?: () => void
+  changingPassword?: boolean
+}) {
   return (
     <header className="flex items-center justify-between gap-4">
       <Wordmark small />
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3">
         {email ? <span className="hidden text-sm text-[var(--dim)] sm:inline">{email}</span> : null}
-        {demo
-          ? <span className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 font-mono text-xs font-bold uppercase text-[var(--dim)]">Demo</span>
-          : <button type="button" onClick={onSignOut} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm font-medium transition hover:bg-[var(--bg2)]">Sign out</button>}
+        {demo ? (
+          <span className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 font-mono text-xs font-bold uppercase text-[var(--dim)]">Demo</span>
+        ) : (
+          <>
+            {onChangePassword ? (
+              <button
+                type="button"
+                onClick={onChangePassword}
+                className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm font-medium transition hover:bg-[var(--bg2)]"
+              >
+                {changingPassword ? 'Close' : 'Change password'}
+              </button>
+            ) : null}
+            <button type="button" onClick={onSignOut} className="rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-sm font-medium transition hover:bg-[var(--bg2)]">Sign out</button>
+          </>
+        )}
       </div>
     </header>
+  )
+}
+
+function ChangePasswordCard({
+  onDone,
+  onCancel,
+  className = '',
+}: {
+  onDone: () => void
+  onCancel: () => void
+  className?: string
+}) {
+  const [pw, setPw] = useState('')
+  const [pw2, setPw2] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [ok, setOk] = useState(false)
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!supabase) return
+    setErr('')
+    setOk(false)
+    if (pw.length < 8) {
+      setErr('Use at least 8 characters.')
+      return
+    }
+    if (pw !== pw2) {
+      setErr('Passwords do not match.')
+      return
+    }
+    setBusy(true)
+    try {
+      const { error } = await supabase.auth.updateUser({ password: pw })
+      if (error) {
+        setErr(error.message)
+        return
+      }
+      setOk(true)
+      setPw('')
+      setPw2('')
+      setTimeout(onDone, 900)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card className={className}>
+      <h2 className="font-display text-xl font-bold">Change password</h2>
+      <form onSubmit={(e) => void onSubmit(e)} className="mt-4 grid gap-3 sm:max-w-md">
+        <Field label="New password">
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            className={inputCls}
+            required
+          />
+        </Field>
+        <Field label="Confirm new password">
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={pw2}
+            onChange={(e) => setPw2(e.target.value)}
+            className={inputCls}
+            required
+          />
+        </Field>
+        {err ? <Alert kind="err">{err}</Alert> : null}
+        {ok ? <Alert kind="ok">Password updated.</Alert> : null}
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-xl bg-[var(--ink)] px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
+          >
+            {busy ? 'Saving…' : 'Update password'}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="rounded-xl border border-[var(--line)] bg-white px-4 py-2.5 text-sm font-semibold hover:bg-[var(--bg2)] disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    </Card>
+  )
+}
+
+function InviteActions({
+  inviteUrl,
+  copied,
+  onCopy,
+}: {
+  inviteUrl: string
+  copied: boolean
+  onCopy: () => void
+}) {
+  const [shareErr, setShareErr] = useState('')
+  // iOS duplicates the URL if both `text` and `url` are set — put the link in text only.
+  const shareData: ShareData = {
+    title: 'Austin Speedrun',
+    text: `${INVITE_SHARE_MESSAGE}\n${inviteUrl}`,
+  }
+  const showShare = Boolean(inviteUrl) && canNativeShare(shareData)
+
+  async function onShare() {
+    setShareErr('')
+    try {
+      await navigator.share(shareData)
+    } catch (e) {
+      // AbortError = user dismissed the sheet; ignore.
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      // Fall back to copy so mobile still has a path if share fails.
+      onCopy()
+      setShareErr('Share unavailable — link copied instead.')
+      window.setTimeout(() => setShareErr(''), 3000)
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-col gap-2">
+      <input
+        readOnly
+        value={inviteUrl}
+        aria-label="Invite link"
+        onFocus={(e) => e.currentTarget.select()}
+        onClick={(e) => e.currentTarget.select()}
+        className="min-w-0 w-full rounded-xl border border-[var(--orange)]/30 bg-white px-3 py-3 text-sm touch-manipulation"
+      />
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onCopy}
+          className="min-h-11 flex-1 rounded-xl bg-[var(--orange)] px-4 py-3 text-sm font-semibold text-white transition hover:brightness-110 touch-manipulation sm:flex-none"
+        >
+          {copied ? 'Copied ✓' : 'Copy link'}
+        </button>
+        {showShare ? (
+          <button
+            type="button"
+            onClick={() => void onShare()}
+            className="min-h-11 flex-1 rounded-xl border border-[var(--line)] bg-white px-4 py-3 text-sm font-semibold text-[var(--ink)] hover:bg-[var(--bg2)] touch-manipulation sm:flex-none"
+          >
+            Share
+          </button>
+        ) : null}
+      </div>
+      {shareErr ? <p className="text-sm text-[var(--teal)]">{shareErr}</p> : null}
+    </div>
   )
 }
 
@@ -529,6 +880,163 @@ function Wordmark({ small }: { small?: boolean }) {
   )
 }
 
+function AddChildForm({ onCancel, onSaved }: { onCancel: () => void; onSaved: () => void }) {
+  const [fullName, setFullName] = useState('')
+  const [grade, setGrade] = useState('')
+  const [dob, setDob] = useState('')
+  const [schoolName, setSchoolName] = useState('')
+  const [schoolType, setSchoolType] = useState('')
+  const [studentEmail, setStudentEmail] = useState('')
+  const [accommodations, setAccommodations] = useState('')
+  const [hasDevice, setHasDevice] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [formErr, setFormErr] = useState('')
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!supabase) return
+    setFormErr('')
+    if (!fullName.trim() || !grade || !dob || !schoolName.trim() || !schoolType) {
+      setFormErr('Name, date of birth, grade, school name, and school type are required.')
+      return
+    }
+    setBusy(true)
+    try {
+      const { error } = await supabase.rpc('add_my_child', {
+        p_full_name: fullName.trim(),
+        p_grade: grade,
+        p_date_of_birth: dob,
+        p_school_name: schoolName.trim(),
+        p_school_type: schoolType,
+        p_student_email: studentEmail.trim() || null,
+        p_accommodations: accommodations.trim() || null,
+        p_has_home_device: hasDevice,
+      })
+      if (error) {
+        setFormErr(error.message)
+        return
+      }
+      onSaved()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form onSubmit={(e) => void onSubmit(e)} className="mt-4 rounded-2xl border border-[var(--line)] bg-[var(--card2)] p-4">
+      <h3 className="text-sm font-semibold text-[var(--ink)]">Add a child</h3>
+      <p className="mt-1 text-xs text-[var(--dim)]">Same details as registration. Under-13 kids may need consent forms.</p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        <label className="text-sm sm:col-span-2">
+          <span className="mb-1 block font-medium">Full legal name</span>
+          <input
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            required
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block font-medium">Date of birth</span>
+          <input
+            type="date"
+            value={dob}
+            onChange={(e) => setDob(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            required
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block font-medium">Grade</span>
+          <select
+            value={grade}
+            onChange={(e) => setGrade(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            required
+          >
+            <option value="">Select…</option>
+            {CHILD_GRADES.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block font-medium">School name</span>
+          <input
+            value={schoolName}
+            onChange={(e) => setSchoolName(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            required
+          />
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block font-medium">School type</span>
+          <select
+            value={schoolType}
+            onChange={(e) => setSchoolType(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            required
+          >
+            <option value="">Select…</option>
+            {SCHOOL_TYPES.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm sm:col-span-2">
+          <span className="mb-1 block font-medium">
+            Student email <span className="font-normal text-[var(--dim)]">(optional, 13+)</span>
+          </span>
+          <input
+            type="email"
+            value={studentEmail}
+            onChange={(e) => setStudentEmail(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+          />
+        </label>
+        <label className="text-sm sm:col-span-2">
+          <span className="mb-1 block font-medium">
+            Accommodations <span className="font-normal text-[var(--dim)]">(optional)</span>
+          </span>
+          <input
+            value={accommodations}
+            onChange={(e) => setAccommodations(e.target.value)}
+            className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2.5"
+            placeholder="IEP / 504"
+          />
+        </label>
+        <label className="flex items-center gap-2 text-sm sm:col-span-2">
+          <input
+            type="checkbox"
+            checked={hasDevice}
+            onChange={(e) => setHasDevice(e.target.checked)}
+            className="size-4"
+          />
+          <span>Device + reliable internet at home</span>
+        </label>
+      </div>
+      {formErr ? <div className="mt-3"><Alert kind="err">{formErr}</Alert></div> : null}
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          type="submit"
+          disabled={busy}
+          className="rounded-xl bg-[var(--orange)] px-4 py-2.5 text-sm font-semibold text-white transition hover:brightness-110 disabled:opacity-50"
+        >
+          {busy ? 'Saving…' : 'Save child'}
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onCancel}
+          className="rounded-xl border border-[var(--line)] bg-white px-4 py-2.5 text-sm font-semibold text-[var(--ink)] hover:bg-[var(--bg2)] disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
 function ChildCard({ child }: { child: Child }) {
   const age = ageFromDob(child.date_of_birth)
   const under13 = age != null && age < 13
@@ -540,8 +1048,18 @@ function ChildCard({ child }: { child: Child }) {
           ? <span className="whitespace-nowrap rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800">Consent needed</span>
           : <span className="whitespace-nowrap rounded-full bg-emerald-100 px-2.5 py-1 text-[11px] font-bold text-emerald-800">Ready</span>}
       </div>
-      <div className="mt-1.5 text-sm text-[var(--dim)]">{[child.grade, child.school_name].filter(Boolean).join(' · ')}</div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
+
+      <div className="mt-3 rounded-xl bg-white/80 px-3 py-2.5">
+        <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-[var(--dim2)]">TimeBack XP</div>
+        <div className="font-display text-2xl font-bold leading-none text-[var(--orange)] tabular-nums">
+          {child.xp ?? 0}
+        </div>
+      </div>
+
+      <div className="mt-3 text-sm text-[var(--dim)]">
+        {[child.grade, child.school_name].filter(Boolean).join(' · ')}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
         <Pill>{child.school_type || 'School'}</Pill>
         {age != null ? <Pill>Age {age}</Pill> : null}
         <Pill>{child.has_home_device ? 'Device ✓' : 'No device'}</Pill>
@@ -552,16 +1070,6 @@ function ChildCard({ child }: { child: Child }) {
 
 function Pill({ children }: { children: React.ReactNode }) {
   return <span className="rounded-md bg-[var(--bg2)] px-2 py-1 font-mono text-[11px] font-medium text-[var(--dim)]">{children}</span>
-}
-
-function Stat({ n, l, acc, mono }: { n: string; l: string; acc: string; mono?: boolean }) {
-  return (
-    <div className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--card)] p-4">
-      <span className="absolute left-0 top-0 h-1 w-full" style={{ background: acc }} />
-      <div className={`font-display font-bold ${mono ? 'font-mono text-lg tracking-tight' : 'text-2xl sm:text-3xl'}`} style={{ color: acc }}>{n}</div>
-      <div className="mt-1.5 font-mono text-[10px] uppercase tracking-wide text-[var(--dim)] sm:text-[11px]">{l}</div>
-    </div>
-  )
 }
 
 function CountUnit({ n, l }: { n: number; l: string }) {
