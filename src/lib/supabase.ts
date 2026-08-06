@@ -19,7 +19,7 @@ export const marketingSiteUrl = (
 )?.replace(/\/$/, '') || 'http://127.0.0.1:8000'
 
 export function inviteUrlForCode(code: string) {
-  const url = new URL('parents.html', `${marketingSiteUrl}/`)
+  const url = new URL('signup.html', `${marketingSiteUrl}/`)
   url.searchParams.set('ref', code)
   url.hash = 'join'
   return url.toString()
